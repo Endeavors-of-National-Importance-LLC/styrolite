@@ -826,28 +826,46 @@ impl AttachRequest {
         }
     }
 
-    fn attach_cgroup(&self) -> Result<()> {
-        let pid = process::id();
+    /// The cgroup this `attach` flow joins, if any.
+    /// If a `styrolite-<identity>` cgroup subtree exists, which is typically created by
+    /// the styrolite `create` flow, that is preferred.
+    ///
+    /// If an explicit cgroup path is provided and `styrolite-<identity>` subtree *doesn't*
+    /// exist, the provided path is preferred.
+    ///
+    /// If nothing is provided (or an invalid cgroup path was provided) and no
+    /// `styrolite-<identity>` subtree exists, the attach flow joins nothing.
+    fn attach_cgroup_target(&self) -> Result<Option<PathBuf>> {
         let cgbase = self
             .cgroupfs
             .clone()
             .unwrap_or("/sys/fs/cgroup".to_string());
-        let name = format!("styrolite-{}", self.identity()?);
+        let subtree = PathBuf::from(&cgbase).join(format!("styrolite-{}", self.identity()?));
 
-        let mut path = PathBuf::from(&cgbase);
-        path.push(&name);
-
-        if !path.exists() {
-            return Ok(());
+        if subtree.exists() {
+            return Ok(Some(subtree));
         }
+        Ok(self
+            .cgroupfs
+            .as_ref()
+            .map(PathBuf::from)
+            .filter(|named| named.exists()))
+    }
 
-        let path_str = path
+    fn attach_cgroup(&self) -> Result<()> {
+        let pid = process::id();
+        let Some(target) = self.attach_cgroup_target()? else {
+            debug!("no cgroup named for this attachment");
+            return Ok(());
+        };
+
+        let path_str = target
             .to_str()
             .ok_or(anyhow!("path is somehow not valid utf-8"))?;
-        let subtree = CGroup::open(path_str)?;
+        let cgroup = CGroup::open(path_str)?;
 
-        debug!("binding supervisor (pid {pid}) to cgroup");
-        subtree
+        debug!("binding pid {pid} to cgroup {path_str}");
+        cgroup
             .clone()
             .set_child_value("cgroup.procs", &format!("{pid}"))?;
 
@@ -1111,6 +1129,7 @@ fn preexec_prep(exec: &ExecutableSpec, capabilities: Option<&Capabilities>) -> R
 mod tests {
     use super::{apply_capabilities, apply_gid_uid, preexec_prep};
     use crate::caps::{CapabilityBit, get_caps};
+    use crate::config::AttachRequest;
     use crate::config::{Capabilities, CreateRequest, ExecutableSpec};
     use crate::namespace::Namespace;
     use crate::unshare::unshare;
@@ -1344,5 +1363,62 @@ mod tests {
                 0
             })
         });
+    }
+
+    #[test]
+    fn attach_joins_the_cgroup_it_was_given() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let request = AttachRequest {
+            cgroupfs: Some(dir.path().to_string_lossy().to_string()),
+            workload_id: Some("some-workload".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            request.attach_cgroup_target().expect("target"),
+            Some(dir.path().to_path_buf())
+        );
+    }
+
+    /// A styrolite-created subtree wins when there is one.
+    #[test]
+    fn attach_prefers_the_supervisors_subtree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let subtree = dir.path().join("styrolite-some-workload");
+        std::fs::create_dir(&subtree).expect("subtree");
+        let request = AttachRequest {
+            cgroupfs: Some(dir.path().to_string_lossy().to_string()),
+            workload_id: Some("some-workload".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            request.attach_cgroup_target().expect("target"),
+            Some(subtree)
+        );
+    }
+
+    /// A cgroup that was named but is not there joins nothing.
+    #[test]
+    fn attach_with_a_missing_cgroup_joins_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let request = AttachRequest {
+            cgroupfs: Some(dir.path().join("gone").to_string_lossy().to_string()),
+            workload_id: Some("some-workload".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(request.attach_cgroup_target().expect("target"), None);
+    }
+
+    /// Naming no cgroup joins none.
+    #[test]
+    fn attach_without_a_cgroup_joins_nothing() {
+        let request = AttachRequest {
+            workload_id: Some("some-workload".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(request.attach_cgroup_target().expect("target"), None);
     }
 }
