@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/edera-dev/styrolite/compare/v0.4.2...v0.4.3) - 2026-08-25
+
+### Fixed
+
+- *(attach)* Allow callers to specify a specific cgroup path for `attach`
+
+### Other
+
+- Merge pull request #180 from bleggett/bleggett/fixup-attach-cgroup-join
+
 ## [0.4.2](https://github.com/edera-dev/styrolite/compare/v0.4.1...v0.4.2) - 2026-07-31
 
 ### Fixed
